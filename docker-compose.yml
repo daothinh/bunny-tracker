@@ -1,0 +1,65 @@
+services:
+  db:
+    image: postgres:16-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: pug_bunny_tricker
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d pug_bunny_tricker"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build:
+      context: ./app
+    restart: unless-stopped
+    env_file:
+      - ./app/.env
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/pug_bunny_tricker?schema=public
+      APP_BASE_URL: http://localhost:3000
+    ports:
+      - "3000:3000"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/api/health').then((res)=>process.exit(res.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  scheduler:
+    image: curlimages/curl:8.16.0
+    restart: unless-stopped
+    env_file:
+      - ./app/.env
+    depends_on:
+      app:
+        condition: service_healthy
+    command: >
+      sh -c '
+        until curl -fsS http://app:3000/api/health > /dev/null; do sleep 5; done;
+        while true; do
+          echo "[scheduler] triggering sync";
+          curl -fsS -X POST "http://app:3000/api/sync?source=schedule" -H "x-management-key: $$MANAGEMENT_KEY" || true;
+          INTERVAL=$${INGEST_INTERVAL_MINUTES:-360};
+          sleep $$((INTERVAL * 60));
+        done
+      '
+
+volumes:
+  postgres_data:

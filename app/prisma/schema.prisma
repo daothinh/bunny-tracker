@@ -1,0 +1,123 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum RepositoryType {
+  SMART_CONTRACTS
+  PROTOCOL
+  INFRASTRUCTURE
+  TOOLING
+  WALLET
+  APPLICATION
+  OTHER
+}
+
+enum SecuritySignalType {
+  SECURITY_FILE
+  BUG_BOUNTY
+  SECURITY_CONTACT
+  RESPONSIBLE_DISCLOSURE
+  README_MENTION
+}
+
+enum ReportStatus {
+  NEW
+  REVIEWING
+  DRAFTING
+  SUBMITTED
+  TRIAGED
+  RESOLVED
+  NOT_APPLICABLE
+}
+
+enum SyncRunStatus {
+  RUNNING
+  SUCCESS
+  PARTIAL_FAILURE
+  FAILURE
+}
+
+model Repository {
+  id                    String             @id @default(cuid())
+  githubRepoId          BigInt             @unique
+  owner                 String
+  name                  String
+  fullName              String             @unique
+  htmlUrl               String
+  description           String?
+  homepageUrl           String?
+  defaultBranch         String?
+  primaryLanguage       String?
+  topics                Json
+  matchedTopics         Json
+  repositoryType        RepositoryType     @default(OTHER)
+  qualificationSummary  String
+  securitySignalType    SecuritySignalType
+  securitySignalUrl     String?
+  securitySignalExcerpt String
+  securityContact       String?
+  bountyProgramUrl      String?
+  reportStatus          ReportStatus       @default(NEW)
+  reportNotes           String?
+  stars                 Int                @default(0)
+  forks                 Int                @default(0)
+  openIssues            Int                @default(0)
+  archived              Boolean            @default(false)
+  lastPushedAt          DateTime?
+  lastScannedAt         DateTime
+  lastSeenAt            DateTime
+  createdAt             DateTime           @default(now())
+  updatedAt             DateTime           @updatedAt
+
+  @@index([reportStatus])
+  @@index([repositoryType])
+  @@index([lastSeenAt])
+}
+
+model SyncRun {
+  id             String        @id @default(cuid())
+  source         String        @default("manual")
+  status         SyncRunStatus @default(RUNNING)
+  queryCount     Int           @default(0)
+  candidateCount Int           @default(0)
+  qualifiedCount Int           @default(0)
+  upsertedCount  Int           @default(0)
+  skippedCount   Int           @default(0)
+  errorCount     Int           @default(0)
+  notes          String?
+  queries        Json?
+  startedAt      DateTime      @default(now())
+  finishedAt     DateTime?
+  errors         SyncError[]
+
+  @@index([startedAt])
+}
+
+model SyncError {
+  id           String   @id @default(cuid())
+  syncRunId    String
+  repoFullName String?
+  stage        String
+  message      String
+  createdAt    DateTime @default(now())
+  syncRun      SyncRun  @relation(fields: [syncRunId], references: [id], onDelete: Cascade)
+
+  @@index([syncRunId])
+  @@index([repoFullName])
+}
+
+model AppSettings {
+  id                    String   @id @default("default")
+  githubTokenEncrypted  String?
+  githubTopics          String[]
+  githubSearchQueries   String[]
+  maxReposPerRun        Int      @default(18)
+  searchResultsPerQuery Int      @default(8)
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+}
