@@ -23,7 +23,7 @@ Repo duoc giu lai khi thoa man ca hai dieu kien:
 
 ## Local setup
 
-1. Cau hinh `app/.env` tu `app/.env.example`.
+1. Copy `app/.env.example` thanh `app/.env`, sau do cap nhat cac gia tri bat buoc nhu `MANAGEMENT_KEY` va `SESSION_SECRET`.
 2. Chay migration lan dau:
 
 ```bash
@@ -43,7 +43,9 @@ npm run dev
 
 ## Docker Compose
 
-Chay toan bo stack:
+1. Copy `app/.env.example` thanh `app/.env`.
+2. Neu can, cap nhat `MANAGEMENT_KEY`, `SESSION_SECRET` va `GITHUB_TOKEN` trong `app/.env`.
+3. Chay toan bo stack:
 
 ```bash
 docker compose up --build
