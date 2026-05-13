@@ -18,6 +18,16 @@ const LEGACY_DEFAULT_SEARCH_QUERIES = [
   "topic:wallet",
   "topic:bridge",
 ] as const;
+const PREVIOUS_DEFAULT_SEARCH_QUERIES = [
+  "topic:smart-contracts language:Solidity",
+  "topic:defi language:Solidity",
+  "topic:wallet",
+  "topic:bridge",
+  "topic:rollup",
+  "topic:foundry language:Solidity",
+] as const;
+
+export type SearchQueryPageMap = Record<string, number>;
 
 export type GitHubRuntimeSettings = {
   githubToken?: string;
@@ -25,9 +35,13 @@ export type GitHubRuntimeSettings = {
   githubSearchQueries: string[];
   maxReposPerRun: number;
   searchResultsPerQuery: number;
+  githubSearchQueryPages: SearchQueryPageMap;
 };
 
-export type DashboardGitHubSettings = GitHubRuntimeSettings & {
+export type DashboardGitHubSettings = Omit<
+  GitHubRuntimeSettings,
+  "githubSearchQueryPages"
+> & {
   githubTokenConfigured: boolean;
   githubTokenMask: string | null;
 };
@@ -71,10 +85,7 @@ function decryptSecret(value: string): string {
 
 function buildDefaultGitHubSettings(): GitHubRuntimeSettings {
   const env = getEnv();
-  const githubSearchQueries = areQueriesEquivalent(
-    env.githubSearchQueries,
-    LEGACY_DEFAULT_SEARCH_QUERIES,
-  )
+  const githubSearchQueries = isLegacyDefaultSearchQueries(env.githubSearchQueries)
     ? [...DEFAULT_SEARCH_QUERIES]
     : [...env.githubSearchQueries];
 
@@ -84,6 +95,7 @@ function buildDefaultGitHubSettings(): GitHubRuntimeSettings {
     githubSearchQueries,
     maxReposPerRun: env.maxReposPerRun,
     searchResultsPerQuery: env.searchResultsPerQuery,
+    githubSearchQueryPages: normaliseSearchQueryPages(null, githubSearchQueries),
   };
 }
 
@@ -94,6 +106,13 @@ function areQueriesEquivalent(
   return (
     left.length === right.length &&
     left.every((value, index) => value === right[index])
+  );
+}
+
+function isLegacyDefaultSearchQueries(queries: readonly string[]): boolean {
+  return (
+    areQueriesEquivalent(queries, LEGACY_DEFAULT_SEARCH_QUERIES) ||
+    areQueriesEquivalent(queries, PREVIOUS_DEFAULT_SEARCH_QUERIES)
   );
 }
 
@@ -109,22 +128,58 @@ function maskToken(value: string | undefined): string | null {
   return `••••${value.slice(-4)}`;
 }
 
+function shouldResetSearchQueryPages(input: {
+  existingQueries: readonly string[];
+  nextQueries: readonly string[];
+  existingSearchResultsPerQuery: number;
+  nextSearchResultsPerQuery: number;
+}): boolean {
+  return (
+    input.existingSearchResultsPerQuery !== input.nextSearchResultsPerQuery ||
+    !areQueriesEquivalent(input.existingQueries, input.nextQueries)
+  );
+}
+
+export function normaliseSearchQueryPages(
+  value: unknown,
+  queries: readonly string[],
+): SearchQueryPageMap {
+  const rawPages =
+    value && typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : {};
+
+  return Object.fromEntries(
+    queries.map((query) => {
+      const rawPage = rawPages[query];
+      const page =
+        typeof rawPage === "number" &&
+        Number.isInteger(rawPage) &&
+        rawPage > 0
+          ? rawPage
+          : 1;
+
+      return [query, page];
+    }),
+  );
+}
+
 async function ensureAppSettingsRecord() {
   const existing = await prisma.appSettings.findUnique({
     where: { id: APP_SETTINGS_ID },
   });
 
   if (existing) {
-    if (
-      areQueriesEquivalent(
-        existing.githubSearchQueries,
-        LEGACY_DEFAULT_SEARCH_QUERIES,
-      )
-    ) {
+    if (isLegacyDefaultSearchQueries(existing.githubSearchQueries)) {
+      const githubSearchQueries = [...DEFAULT_SEARCH_QUERIES];
       return prisma.appSettings.update({
         where: { id: APP_SETTINGS_ID },
         data: {
-          githubSearchQueries: [...DEFAULT_SEARCH_QUERIES],
+          githubSearchQueries,
+          searchQueryPages: normaliseSearchQueryPages(
+            existing.searchQueryPages,
+            githubSearchQueries,
+          ),
         },
       });
     }
@@ -145,6 +200,7 @@ async function ensureAppSettingsRecord() {
         githubSearchQueries: defaults.githubSearchQueries,
         maxReposPerRun: defaults.maxReposPerRun,
         searchResultsPerQuery: defaults.searchResultsPerQuery,
+        searchQueryPages: defaults.githubSearchQueryPages,
       },
     });
   } catch (error) {
@@ -164,6 +220,7 @@ async function ensureAppSettingsRecord() {
 function mapSettingsRecord(
   record: Awaited<ReturnType<typeof ensureAppSettingsRecord>>,
 ): GitHubRuntimeSettings {
+  const defaults = buildDefaultGitHubSettings();
   let githubToken: string | undefined;
   if (record.githubTokenEncrypted) {
     try {
@@ -178,13 +235,19 @@ function mapSettingsRecord(
     githubTopics:
       record.githubTopics.length > 0
         ? record.githubTopics
-        : buildDefaultGitHubSettings().githubTopics,
+        : defaults.githubTopics,
     githubSearchQueries:
       record.githubSearchQueries.length > 0
         ? record.githubSearchQueries
-        : buildDefaultGitHubSettings().githubSearchQueries,
+        : defaults.githubSearchQueries,
     maxReposPerRun: record.maxReposPerRun,
     searchResultsPerQuery: record.searchResultsPerQuery,
+    githubSearchQueryPages: normaliseSearchQueryPages(
+      record.searchQueryPages,
+      record.githubSearchQueries.length > 0
+        ? record.githubSearchQueries
+        : defaults.githubSearchQueries,
+    ),
   };
 }
 
@@ -228,9 +291,16 @@ export async function getGitHubRuntimeSettings(): Promise<GitHubRuntimeSettings>
 
 export async function getDashboardGitHubSettings(): Promise<DashboardGitHubSettings> {
   const settings = await getGitHubRuntimeSettings();
+  const dashboardSettings = {
+    githubToken: settings.githubToken,
+    githubTopics: settings.githubTopics,
+    githubSearchQueries: settings.githubSearchQueries,
+    maxReposPerRun: settings.maxReposPerRun,
+    searchResultsPerQuery: settings.searchResultsPerQuery,
+  };
 
   return {
-    ...settings,
+    ...dashboardSettings,
     githubTokenConfigured: Boolean(settings.githubToken),
     githubTokenMask: maskToken(settings.githubToken),
   };
@@ -245,6 +315,13 @@ export async function updateGitHubRuntimeSettings(input: {
   searchResultsPerQuery: number;
 }): Promise<void> {
   const existing = await ensureAppSettingsRecord();
+  const githubSearchQueries = [...input.githubSearchQueries];
+  const resetSearchQueryPages = shouldResetSearchQueryPages({
+    existingQueries: existing.githubSearchQueries,
+    nextQueries: githubSearchQueries,
+    existingSearchResultsPerQuery: existing.searchResultsPerQuery,
+    nextSearchResultsPerQuery: input.searchResultsPerQuery,
+  });
 
   let githubTokenEncrypted = existing.githubTokenEncrypted;
   if (input.clearGithubToken) {
@@ -258,9 +335,28 @@ export async function updateGitHubRuntimeSettings(input: {
     data: {
       githubTokenEncrypted,
       githubTopics: input.githubTopics,
-      githubSearchQueries: input.githubSearchQueries,
+      githubSearchQueries,
       maxReposPerRun: input.maxReposPerRun,
       searchResultsPerQuery: input.searchResultsPerQuery,
+      searchQueryPages: normaliseSearchQueryPages(
+        resetSearchQueryPages ? null : existing.searchQueryPages,
+        githubSearchQueries,
+      ),
+    },
+  });
+}
+
+export async function updateGitHubSearchQueryPages(input: {
+  githubSearchQueries: string[];
+  githubSearchQueryPages: SearchQueryPageMap;
+}): Promise<void> {
+  await prisma.appSettings.update({
+    where: { id: APP_SETTINGS_ID },
+    data: {
+      searchQueryPages: normaliseSearchQueryPages(
+        input.githubSearchQueryPages,
+        input.githubSearchQueries,
+      ),
     },
   });
 }

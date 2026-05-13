@@ -31,9 +31,12 @@ export const DEFAULT_WEB3_TOPICS = [
 export const DEFAULT_SEARCH_QUERIES = [
   "topic:smart-contracts language:Solidity",
   "topic:defi language:Solidity",
-  "topic:wallet",
-  "topic:bridge",
-  "topic:rollup",
+  "topic:wallet topic:ethereum",
+  "topic:wallet topic:blockchain",
+  "topic:bridge topic:ethereum",
+  "topic:bridge topic:blockchain",
+  "topic:rollup topic:ethereum",
+  "topic:layer2 topic:ethereum",
   "topic:foundry language:Solidity",
 ] as const;
 

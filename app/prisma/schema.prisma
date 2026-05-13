@@ -118,6 +118,7 @@ model AppSettings {
   githubSearchQueries   String[]
   maxReposPerRun        Int      @default(18)
   searchResultsPerQuery Int      @default(8)
+  searchQueryPages      Json?
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
 }

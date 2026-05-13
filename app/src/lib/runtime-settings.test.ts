@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  normaliseSearchQueryPages,
   parseSearchQueryInput,
   parseTopicInput,
 } from "@/lib/runtime-settings";
@@ -22,5 +23,21 @@ describe("runtime settings parsers", () => {
       "topic:defi OR topic:wallet",
       "language:Solidity stars:>=25",
     ]);
+  });
+
+  it("normalises search page state for the active queries only", () => {
+    expect(
+      normaliseSearchQueryPages(
+        {
+          "topic:defi": 3,
+          "topic:wallet": 0,
+          "topic:bridge": 8,
+        },
+        ["topic:defi", "topic:wallet"],
+      ),
+    ).toEqual({
+      "topic:defi": 3,
+      "topic:wallet": 1,
+    });
   });
 });

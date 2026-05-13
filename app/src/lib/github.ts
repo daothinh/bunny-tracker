@@ -10,11 +10,19 @@ import {
   DEFAULT_WEB3_TOPICS,
   SECURITY_FILE_CANDIDATES,
 } from "@/lib/constants";
-import { getGitHubRuntimeSettings, type GitHubRuntimeSettings } from "@/lib/runtime-settings";
+import {
+  getGitHubRuntimeSettings,
+  type GitHubRuntimeSettings,
+  type SearchQueryPageMap,
+  updateGitHubSearchQueryPages,
+} from "@/lib/runtime-settings";
 
 const GITHUB_API_BASE = "https://api.github.com";
 const DEFAULT_MIN_STARS = 5;
 const ACTIVE_REPOSITORY_LOOKBACK_DAYS = 540;
+const CONTEXT_REQUIRED_WEB3_TOPICS = new Set(["wallet", "bridge", "rollup"]);
+const WEB3_CONTEXT_PATTERN =
+  /\b(web3|blockchain|crypto(?:currency)?|bitcoin|ethereum|evm|solidity|smart(?: |-)?contracts?|defi|layer(?: |-)?2|on-?chain|token(?:s|ized)?|nft|dao)\b/i;
 
 type GitHubRepositorySearchItem = {
   id: number;
@@ -40,6 +48,13 @@ type GitHubSearchResponse = {
   items: GitHubRepositorySearchItem[];
 };
 
+type QuerySearchState = {
+  rawQuery: string;
+  effectiveQuery: string;
+  nextPage: number;
+  active: boolean;
+};
+
 type MarkdownDocument = {
   path: string;
   body: string;
@@ -63,6 +78,11 @@ export type SyncSummary = {
   upsertedCount: number;
   skippedCount: number;
   errorCount: number;
+};
+
+type SearchRepositoriesResult = {
+  candidates: GitHubRepositorySearchItem[];
+  nextSearchQueryPages: SearchQueryPageMap;
 };
 
 function createGitHubHeaders(
@@ -182,6 +202,38 @@ export function matchWeb3Topics(
 ): string[] {
   const allowed = new Set(allowlist.map(normaliseTopic));
   return unique(topics.map(normaliseTopic).filter((topic) => allowed.has(topic)));
+}
+
+export function hasStrongWeb3Context(input: {
+  topics?: string[];
+  matchedTopics: string[];
+  readme?: MarkdownDocument | null;
+  securityFile?: MarkdownDocument | null;
+  description?: string | null;
+  homepageUrl?: string | null;
+}): boolean {
+  const matchedTopics = unique(input.matchedTopics.map(normaliseTopic));
+  if (matchedTopics.length === 0) {
+    return false;
+  }
+
+  if (
+    matchedTopics.some((topic) => !CONTEXT_REQUIRED_WEB3_TOPICS.has(topic))
+  ) {
+    return true;
+  }
+
+  const combinedText = collapseWhitespace(
+    [
+      (input.topics ?? []).join(" "),
+      input.description ?? "",
+      input.homepageUrl ?? "",
+      input.readme?.body ?? "",
+      input.securityFile?.body ?? "",
+    ].join("\n"),
+  );
+
+  return WEB3_CONTEXT_PATTERN.test(combinedText);
 }
 
 export function classifyRepositoryType(
@@ -424,26 +476,148 @@ async function fetchSecurityFile(
   return null;
 }
 
-async function searchRepositories(
+function getSearchResultsPerPage(settings: GitHubRuntimeSettings): number {
+  return Math.max(1, Math.min(settings.searchResultsPerQuery, 100));
+}
+
+async function fetchRepositorySearchPage(
+  searchQuery: string,
+  page: number,
   settings: GitHubRuntimeSettings,
-  effectiveQueries: string[],
 ): Promise<GitHubRepositorySearchItem[]> {
-  const deduped = new Map<string, GitHubRepositorySearchItem>();
+  const data = await githubJson<GitHubSearchResponse>(
+    `/search/repositories?q=${encodeURIComponent(searchQuery)}&sort=updated&order=desc&per_page=${getSearchResultsPerPage(settings)}&page=${page}`,
+    settings,
+  );
 
-  for (const searchQuery of effectiveQueries) {
-    const data = await githubJson<GitHubSearchResponse>(
-      `/search/repositories?q=${encodeURIComponent(searchQuery)}&sort=updated&order=desc&per_page=${settings.searchResultsPerQuery}`,
-      settings,
-    );
+  return data.items;
+}
 
-    for (const item of data.items) {
-      if (!deduped.has(item.full_name)) {
-        deduped.set(item.full_name, item);
+function getNextSearchPage(
+  currentPage: number,
+  itemCount: number,
+  perPage: number,
+): number {
+  return itemCount < perPage ? 1 : currentPage + 1;
+}
+
+export function selectRepositoryCandidates<T extends { full_name: string }>(
+  resultsByQuery: readonly (readonly T[])[],
+  maxReposPerRun: number,
+): T[] {
+  const deduped = new Map<string, T>();
+  const longestResultSet = resultsByQuery.reduce(
+    (longest, results) => Math.max(longest, results.length),
+    0,
+  );
+
+  for (
+    let resultIndex = 0;
+    resultIndex < longestResultSet && deduped.size < maxReposPerRun;
+    resultIndex += 1
+  ) {
+    for (const results of resultsByQuery) {
+      const candidate = results[resultIndex];
+      if (!candidate || deduped.has(candidate.full_name)) {
+        continue;
+      }
+
+      deduped.set(candidate.full_name, candidate);
+      if (deduped.size >= maxReposPerRun) {
+        break;
       }
     }
   }
 
-  return [...deduped.values()].slice(0, settings.maxReposPerRun);
+  return [...deduped.values()];
+}
+
+async function searchRepositories(
+  settings: GitHubRuntimeSettings,
+  queryStatesInput: Array<{
+    rawQuery: string;
+    effectiveQuery: string;
+  }>,
+): Promise<SearchRepositoriesResult> {
+  const perPage = getSearchResultsPerPage(settings);
+  const queryStates: QuerySearchState[] = queryStatesInput.map((query) => ({
+    rawQuery: query.rawQuery,
+    effectiveQuery: query.effectiveQuery,
+    nextPage: settings.githubSearchQueryPages[query.rawQuery] ?? 1,
+    active: true,
+  }));
+  const nextSearchQueryPages: SearchQueryPageMap = {
+    ...settings.githubSearchQueryPages,
+  };
+  const selectedCandidates = new Map<string, GitHubRepositorySearchItem>();
+  const maxBatches =
+    Math.max(
+      1,
+      Math.ceil(
+        settings.maxReposPerRun /
+          Math.max(1, queryStatesInput.length * perPage),
+      ),
+    ) + 2;
+
+  for (
+    let batchIndex = 0;
+    batchIndex < maxBatches &&
+    selectedCandidates.size < settings.maxReposPerRun;
+    batchIndex += 1
+  ) {
+    const activeStates = queryStates.filter((state) => state.active);
+    if (activeStates.length === 0) {
+      break;
+    }
+
+    const batchResults = await Promise.all(
+      activeStates.map(async (state) => {
+        const currentPage = state.nextPage;
+        const items = await fetchRepositorySearchPage(
+          state.effectiveQuery,
+          currentPage,
+          settings,
+        );
+
+        state.nextPage = getNextSearchPage(currentPage, items.length, perPage);
+        state.active = items.length === perPage;
+        nextSearchQueryPages[state.rawQuery] = state.nextPage;
+
+        return items;
+      }),
+    );
+    const batchCandidates = selectRepositoryCandidates(
+      batchResults,
+      settings.maxReposPerRun - selectedCandidates.size,
+    );
+    let addedInBatch = 0;
+
+    for (const candidate of batchCandidates) {
+      if (selectedCandidates.has(candidate.full_name)) {
+        continue;
+      }
+
+      selectedCandidates.set(candidate.full_name, candidate);
+      addedInBatch += 1;
+    }
+
+    if (addedInBatch === 0) {
+      break;
+    }
+  }
+
+  return {
+    candidates: [...selectedCandidates.values()],
+    nextSearchQueryPages,
+  };
+}
+
+async function pruneRepositoryIfTracked(fullName: string): Promise<void> {
+  await prisma.repository.deleteMany({
+    where: {
+      fullName,
+    },
+  });
 }
 
 async function qualifyRepository(
@@ -464,6 +638,19 @@ async function qualifyRepository(
       settings,
     ),
   ]);
+
+  if (
+    !hasStrongWeb3Context({
+      topics: repo.topics,
+      matchedTopics,
+      readme,
+      securityFile,
+      description: repo.description,
+      homepageUrl: repo.homepage,
+    })
+  ) {
+    return null;
+  }
 
   const evidence = extractSecurityEvidence({
     readme,
@@ -579,15 +766,16 @@ export async function runGitHubSync(
   source: "manual" | "schedule",
 ): Promise<SyncSummary> {
   const settings = await getGitHubRuntimeSettings();
-  const effectiveQueries = settings.githubSearchQueries.map((query) =>
-    buildRepositorySearchQuery(query),
-  );
+  const queryStates = settings.githubSearchQueries.map((rawQuery) => ({
+    rawQuery,
+    effectiveQuery: buildRepositorySearchQuery(rawQuery),
+  }));
   const run = await prisma.syncRun.create({
     data: {
       source,
       status: SyncRunStatus.RUNNING,
-      queryCount: effectiveQueries.length,
-      queries: effectiveQueries,
+      queryCount: queryStates.length,
+      queries: queryStates.map((query) => query.effectiveQuery),
     },
   });
 
@@ -598,14 +786,22 @@ export async function runGitHubSync(
   let errorCount = 0;
 
   try {
-    const candidates = await searchRepositories(settings, effectiveQueries);
+    const { candidates, nextSearchQueryPages } = await searchRepositories(
+      settings,
+      queryStates,
+    );
     candidateCount = candidates.length;
+    await updateGitHubSearchQueryPages({
+      githubSearchQueries: settings.githubSearchQueries,
+      githubSearchQueryPages: nextSearchQueryPages,
+    });
 
     for (const candidate of candidates) {
       try {
         const qualifiedRepository = await qualifyRepository(candidate, settings);
         if (!qualifiedRepository) {
           skippedCount += 1;
+          await pruneRepositoryIfTracked(candidate.full_name);
           continue;
         }
 
