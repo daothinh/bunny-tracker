@@ -293,7 +293,7 @@ export default async function DashboardPage({
           {repositories.map((repository) => (
             <article
               key={repository.id}
-              className="shell-panel rounded-[2rem] p-5"
+              className="shell-panel rounded-[2rem] p-4 sm:p-5"
             >
               <div className="flex items-start justify-between gap-4">
                 <div>
@@ -306,7 +306,7 @@ export default async function DashboardPage({
                     {repository.fullName}
                     <ExternalLink className="h-4 w-4" />
                   </a>
-                  <p className="mt-2 text-sm leading-7 text-[color:var(--muted)]">
+                  <p className="mt-1.5 text-sm leading-6 text-[color:var(--muted)] line-clamp-3">
                     {repository.description ?? "No description"}
                   </p>
                 </div>
@@ -315,19 +315,19 @@ export default async function DashboardPage({
                 </span>
               </div>
 
-              <div className="mt-4 flex flex-wrap gap-2">
+              <div className="mt-3 flex flex-wrap gap-1.5">
                 {(repository.matchedTopics as string[]).map((topic) => (
                   <span
                     key={topic}
-                    className="rounded-full border border-[color:var(--line)] bg-white/60 px-3 py-1 text-xs"
+                    className="rounded-full border border-[color:var(--line)] bg-white/60 px-2.5 py-1 text-xs"
                   >
                     {topic}
                   </span>
                 ))}
               </div>
 
-              <div className="mt-5 grid gap-4">
-                <div className="rounded-2xl border border-[color:var(--line)] bg-white/55 p-4 text-sm">
+              <div className="mt-4 grid gap-3.5">
+                <div className="rounded-2xl border border-[color:var(--line)] bg-white/55 p-3.5 text-sm">
                   <div className="flex items-center justify-between gap-3">
                     <p className="font-semibold">
                       {SECURITY_SIGNAL_LABELS[repository.securitySignalType]}
@@ -364,7 +364,7 @@ export default async function DashboardPage({
                   </div>
                 </div>
 
-                <form action={updateRepositoryAction} className="grid gap-3">
+                <form action={updateRepositoryAction} className="grid gap-2.5">
                   <input type="hidden" name="repositoryId" value={repository.id} />
                   <label className="flex flex-col gap-2 text-sm text-[color:var(--muted)]">
                     Status
@@ -384,23 +384,26 @@ export default async function DashboardPage({
                     Notes
                     <textarea
                       name="reportNotes"
-                      rows={4}
+                      rows={3}
                       defaultValue={repository.reportNotes ?? ""}
-                      className="field rounded-2xl px-4 py-3"
+                      className="field rounded-2xl px-4 py-3 leading-6"
                       placeholder="Keep context for report submission here"
                     />
                   </label>
                   <SubmitButton
                     pendingLabel="Saving..."
-                    className="action-primary h-11 rounded-2xl"
-                    >
-                      Save status
-                    </SubmitButton>
+                    className="action-primary h-10 rounded-2xl"
+                  >
+                    Save status
+                  </SubmitButton>
                 </form>
 
-                <div className="grid grid-cols-3 gap-3 text-xs text-[color:var(--muted)]">
+                <div className="grid grid-cols-2 gap-2.5 text-xs text-[color:var(--muted)] md:grid-cols-4">
                   <span className="shell-pill rounded-2xl px-3 py-2">
                     Stars: {repository.stars}
+                  </span>
+                  <span className="shell-pill rounded-2xl px-3 py-2">
+                    Issues: {repository.openIssues}
                   </span>
                   <span className="shell-pill rounded-2xl px-3 py-2">
                     Pushed: {formatRelativeDate(repository.lastPushedAt)}
@@ -416,14 +419,14 @@ export default async function DashboardPage({
 
         <section className="shell-panel hidden overflow-hidden rounded-[2rem] xl:block">
           <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-[color:var(--line)] text-sm">
+            <table className="min-w-full table-fixed divide-y divide-[color:var(--line)] text-sm">
               <thead className="bg-white/50 text-left text-xs uppercase tracking-[0.2em] text-[color:var(--muted)]">
                 <tr>
-                  <th className="px-5 py-4">Repository</th>
-                  <th className="px-5 py-4">Type</th>
-                  <th className="px-5 py-4">Security signal</th>
-                  <th className="px-5 py-4">Workflow</th>
-                  <th className="px-5 py-4">Activity</th>
+                  <th className="w-[30%] px-4 py-3.5">Repository</th>
+                  <th className="w-[11%] px-4 py-3.5">Type</th>
+                  <th className="w-[22%] px-4 py-3.5">Security signal</th>
+                  <th className="w-[18%] px-4 py-3.5">Workflow</th>
+                  <th className="w-[19%] px-4 py-3.5">Activity</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-[color:var(--line)] align-top">
@@ -439,42 +442,45 @@ export default async function DashboardPage({
                 ) : null}
 
                 {repositories.map((repository) => (
-                  <tr key={repository.id} className="bg-white/30">
-                    <td className="px-5 py-5">
+                  <tr
+                    key={repository.id}
+                    className="bg-white/30 transition hover:bg-white/45"
+                  >
+                    <td className="px-4 py-4">
                       <a
                         href={repository.htmlUrl}
                         target="_blank"
                         rel="noreferrer"
-                        className="inline-flex items-center gap-2 text-base font-semibold transition hover:text-[color:var(--accent)]"
+                        className="inline-flex items-center gap-2 text-[15px] font-semibold leading-6 transition hover:text-[color:var(--accent)]"
                       >
                         {repository.fullName}
                         <ExternalLink className="h-4 w-4" />
                       </a>
-                      <p className="mt-2 max-w-md leading-7 text-[color:var(--muted)]">
+                      <p className="mt-1.5 max-w-md text-sm leading-6 text-[color:var(--muted)] line-clamp-3">
                         {repository.description ?? "No description"}
                       </p>
-                      <div className="mt-3 flex max-w-md flex-wrap gap-2">
+                      <div className="mt-2.5 flex max-w-md flex-wrap gap-1.5">
                         {(repository.matchedTopics as string[]).map((topic) => (
                           <span
                             key={topic}
-                            className="rounded-full border border-[color:var(--line)] bg-white/70 px-3 py-1 text-xs"
+                            className="rounded-full border border-[color:var(--line)] bg-white/70 px-2.5 py-1 text-xs"
                           >
                             {topic}
                           </span>
                         ))}
                       </div>
                     </td>
-                    <td className="px-5 py-5">
-                      <span className="shell-pill inline-flex rounded-full px-3 py-1.5 font-medium">
+                    <td className="px-4 py-4">
+                      <span className="shell-pill inline-flex rounded-full px-3 py-1 text-xs font-medium">
                         {REPOSITORY_TYPE_LABELS[repository.repositoryType]}
                       </span>
                     </td>
-                    <td className="px-5 py-5">
-                      <div className="max-w-sm space-y-3">
-                        <div className="inline-flex rounded-full border border-[color:var(--line)] bg-white/70 px-3 py-1.5 text-xs font-medium">
+                    <td className="px-4 py-4">
+                      <div className="max-w-sm space-y-2.5 rounded-[1.4rem] border border-[color:var(--line)] bg-white/55 p-3.5">
+                        <div className="inline-flex rounded-full border border-[color:var(--line)] bg-white/80 px-3 py-1 text-xs font-medium">
                           {SECURITY_SIGNAL_LABELS[repository.securitySignalType]}
                         </div>
-                        <div className="flex flex-wrap gap-3 text-xs">
+                        <div className="flex flex-wrap gap-2.5 text-xs leading-5">
                           {repository.securitySignalUrl ? (
                             <a
                               href={repository.securitySignalUrl}
@@ -506,13 +512,17 @@ export default async function DashboardPage({
                         </div>
                       </div>
                     </td>
-                    <td className="px-5 py-5">
-                      <form action={updateRepositoryAction} className="w-72 space-y-3">
+                    <td className="px-4 py-4">
+                      <form
+                        action={updateRepositoryAction}
+                        className="w-[16rem] max-w-full space-y-2"
+                      >
                         <input type="hidden" name="repositoryId" value={repository.id} />
                         <select
                           name="reportStatus"
+                          aria-label="Report status"
                           defaultValue={repository.reportStatus}
-                          className="field w-full rounded-2xl px-4 py-3"
+                          className="field h-10 w-full rounded-2xl px-4 py-2.5"
                         >
                           {REPORT_STATUS_OPTIONS.map((status) => (
                             <option key={status} value={status}>
@@ -522,25 +532,32 @@ export default async function DashboardPage({
                         </select>
                         <textarea
                           name="reportNotes"
-                          rows={4}
+                          aria-label="Report notes"
+                          rows={1}
                           defaultValue={repository.reportNotes ?? ""}
-                          className="field w-full rounded-2xl px-4 py-3"
+                          className="field h-10 min-h-10 w-full resize-none overflow-hidden rounded-2xl px-4 py-2.5 leading-5"
                           placeholder="Track report status, notes, or blockers"
                         />
                         <SubmitButton
                           pendingLabel="Saving..."
-                          className="action-primary h-10 rounded-2xl w-full"
+                          className="action-primary h-10 w-full rounded-2xl px-4"
                         >
                           Save
                         </SubmitButton>
                       </form>
                     </td>
-                    <td className="px-5 py-5 text-[color:var(--muted)]">
-                      <div className="space-y-2">
-                        <p>Stars: {repository.stars}</p>
-                        <p>Open issues: {repository.openIssues}</p>
-                        <p>Pushed: {formatRelativeDate(repository.lastPushedAt)}</p>
-                        <p>Scanned: {formatRelativeDate(repository.lastScannedAt)}</p>
+                    <td className="px-4 py-4">
+                      <div className="rounded-[1.4rem] border border-[color:var(--line)] bg-white/55 p-3 text-xs text-[color:var(--muted)]">
+                        <div className="grid grid-cols-[auto_1fr] gap-x-2 gap-y-1.5 leading-5">
+                          <span className="font-medium text-[color:var(--foreground)]">Stars</span>
+                          <span>{repository.stars}</span>
+                          <span className="font-medium text-[color:var(--foreground)]">Issues</span>
+                          <span>{repository.openIssues}</span>
+                          <span className="font-medium text-[color:var(--foreground)]">Pushed</span>
+                          <span>{formatRelativeDate(repository.lastPushedAt)}</span>
+                          <span className="font-medium text-[color:var(--foreground)]">Scanned</span>
+                          <span>{formatRelativeDate(repository.lastScannedAt)}</span>
+                        </div>
                       </div>
                     </td>
                   </tr>
