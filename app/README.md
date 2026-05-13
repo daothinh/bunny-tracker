@@ -19,7 +19,7 @@ Repo duoc giu lai khi thoa man ca hai dieu kien:
 - Next.js 16 + TypeScript
 - PostgreSQL + Prisma
 - Dashboard auth bang `MANAGEMENT_KEY`
-- Docker Compose cho `app`, `db`, `scheduler`
+- Docker Compose cho `app`, `db`, `migrate`, `scheduler`
 
 ## Local setup
 

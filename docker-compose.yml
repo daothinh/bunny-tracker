@@ -1,35 +1,54 @@
 services:
   db:
-    image: postgres:16-bookworm
+    image: postgres:18.3-bookworm
     restart: unless-stopped
     environment:
-      POSTGRES_DB: pug_bunny_tricker
+      POSTGRES_DB: bunny_tracker
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
+      PGDATA: /var/lib/postgresql/data/pgdata
     ports:
       - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d pug_bunny_tricker"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d bunny_tracker"]
       interval: 10s
       timeout: 5s
       retries: 10
 
-  app:
+  migrate:
+    image: bunny-tracker-app:migrate
     build:
       context: ./app
+      target: migrate
+    restart: "no"
+    env_file:
+      - ./app/.env
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/bunny_tracker?schema=public
+    depends_on:
+      db:
+        condition: service_healthy
+
+  app:
+    image: bunny-tracker-app:runtime
+    build:
+      context: ./app
+      target: runtime
     restart: unless-stopped
     env_file:
       - ./app/.env
     environment:
-      DATABASE_URL: postgresql://postgres:postgres@db:5432/pug_bunny_tricker?schema=public
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/bunny_tracker?schema=public
       APP_BASE_URL: http://localhost:3000
     ports:
       - "3000:3000"
     depends_on:
       db:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
       test:
         [
@@ -43,7 +62,7 @@ services:
       retries: 10
 
   scheduler:
-    image: curlimages/curl:8.16.0
+    image: curlimages/curl:8.20.0
     restart: unless-stopped
     env_file:
       - ./app/.env
