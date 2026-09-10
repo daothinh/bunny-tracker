@@ -1,5 +1,6 @@
 import {
   type Repository,
+  RepositoryScope,
   RepositoryType,
   SecuritySignalType,
   SyncRunStatus,
@@ -14,15 +15,46 @@ import {
   getGitHubRuntimeSettings,
   type GitHubRuntimeSettings,
   type SearchQueryPageMap,
+  type SearchQueryPageState,
   updateGitHubSearchQueryPages,
 } from "@/lib/runtime-settings";
 
 const GITHUB_API_BASE = "https://api.github.com";
 const DEFAULT_MIN_STARS = 5;
 const ACTIVE_REPOSITORY_LOOKBACK_DAYS = 540;
-const CONTEXT_REQUIRED_WEB3_TOPICS = new Set(["wallet", "bridge", "rollup"]);
+const STALE_SYNC_RUN_THRESHOLD_MINUTES = 15;
+// GitHub Search API primary limit ~30 req/phút. Mỗi run chỉ bắn tối đa ngần này
+// query để không chạm trần (mỗi query = 1 search request); phần dư do rotation phủ.
+const MAX_SEARCH_QUERIES_PER_RUN = 30;
+// Topic mơ hồ — cũng được dùng ngoài web3 (ngôn ngữ lập trình, thuật ngữ
+// chung) — bắt buộc phải có ngữ cảnh web3 rõ ràng (README/description/SECURITY
+// khớp WEB3_CONTEXT_PATTERN) mới được gắn scope WEB3.
+const CONTEXT_REQUIRED_WEB3_TOPICS = new Set([
+  "crypto",
+  "rust",
+  "cairo",
+  "ink",
+  "decentralized",
+  "wallet",
+  "bridge",
+  "rollup",
+  "layer2",
+  "foundry",
+  "hardhat",
+  "account-abstraction",
+  "multisig",
+  "amm",
+  "dex",
+  "oracle",
+  "indexer",
+  "governance",
+  "voting",
+  "metaverse",
+  "lending",
+  "staking",
+]);
 const WEB3_CONTEXT_PATTERN =
-  /\b(web3|blockchain|crypto(?:currency)?|bitcoin|ethereum|evm|solidity|smart(?: |-)?contracts?|defi|layer(?: |-)?2|on-?chain|token(?:s|ized)?|nft|dao)\b/i;
+  /\b(web3|blockchain|crypto(?:currency)?|bitcoin|decred|ethereum|evm|solidity|vyper|smart(?: |-)?contracts?|defi|dapps?|solana|polkadot|substrate|starknet|near(?: |-)?protocol|cardano|tron|binance|chainlink|cosmos|move|layer(?: |-)?2|rollup|bridge|validator|staking|restaking|on-?chain|cross-?chain|token(?:s|ized)?|nft|dao)\b/i;
 
 type GitHubRepositorySearchItem = {
   id: number;
@@ -51,8 +83,8 @@ type GitHubSearchResponse = {
 type QuerySearchState = {
   rawQuery: string;
   effectiveQuery: string;
-  nextPage: number;
-  active: boolean;
+  searchPage: number;
+  itemOffset: number;
 };
 
 type MarkdownDocument = {
@@ -83,6 +115,17 @@ export type SyncSummary = {
 type SearchRepositoriesResult = {
   candidates: GitHubRepositorySearchItem[];
   nextSearchQueryPages: SearchQueryPageMap;
+  nextRotationOffset: number;
+  errors: Array<{
+    rawQuery: string;
+    searchPage: number;
+    message: string;
+  }>;
+};
+
+type CandidateSelectionResult<T extends { full_name: string }> = {
+  candidates: T[];
+  nextQueryPages: SearchQueryPageState[];
 };
 
 function createGitHubHeaders(
@@ -152,6 +195,10 @@ function normaliseTopic(value: string): string {
   return value.trim().toLowerCase();
 }
 
+function splitTopicTokens(value: string): string[] {
+  return value.split(/[^a-z0-9]+/).filter(Boolean);
+}
+
 function formatGitHubSearchDate(value: Date): string {
   return value.toISOString().slice(0, 10);
 }
@@ -201,7 +248,32 @@ export function matchWeb3Topics(
   allowlist: readonly string[] = DEFAULT_WEB3_TOPICS,
 ): string[] {
   const allowed = new Set(allowlist.map(normaliseTopic));
-  return unique(topics.map(normaliseTopic).filter((topic) => allowed.has(topic)));
+  const matchedTopics: string[] = [];
+
+  for (const topic of topics) {
+    const normalisedTopic = normaliseTopic(topic);
+    if (!normalisedTopic) {
+      continue;
+    }
+
+    if (allowed.has(normalisedTopic)) {
+      matchedTopics.push(normalisedTopic);
+      continue;
+    }
+
+    const compactTopic = normalisedTopic.replace(/[^a-z0-9]+/g, "");
+    if (compactTopic && allowed.has(compactTopic)) {
+      matchedTopics.push(compactTopic);
+    }
+
+    for (const token of splitTopicTokens(normalisedTopic)) {
+      if (allowed.has(token)) {
+        matchedTopics.push(token);
+      }
+    }
+  }
+
+  return unique(matchedTopics);
 }
 
 export function hasStrongWeb3Context(input: {
@@ -209,6 +281,7 @@ export function hasStrongWeb3Context(input: {
   matchedTopics: string[];
   readme?: MarkdownDocument | null;
   securityFile?: MarkdownDocument | null;
+  supplementalDocuments?: readonly MarkdownDocument[];
   description?: string | null;
   homepageUrl?: string | null;
 }): boolean {
@@ -230,6 +303,7 @@ export function hasStrongWeb3Context(input: {
       input.homepageUrl ?? "",
       input.readme?.body ?? "",
       input.securityFile?.body ?? "",
+      ...(input.supplementalDocuments?.map((document) => document.body) ?? []),
     ].join("\n"),
   );
 
@@ -251,7 +325,7 @@ export function classifyRepositoryType(
   }
 
   if (
-    ["bridge", "rollup", "layer2", "sequencer", "node", "validator"].some(
+    ["bridge", "rollup", "layer2", "sequencer", "node", "validator", "consensus", "chain", "network"].some(
       (value) => joined.has(value),
     )
   ) {
@@ -259,7 +333,7 @@ export function classifyRepositoryType(
   }
 
   if (
-    ["sdk", "tooling", "hardhat", "foundry", "indexer", "subgraph"].some(
+    ["sdk", "tooling", "hardhat", "foundry", "indexer", "subgraph", "library", "framework"].some(
       (value) => joined.has(value),
     )
   ) {
@@ -267,7 +341,7 @@ export function classifyRepositoryType(
   }
 
   if (
-    ["defi", "dao", "amm", "dex", "lending", "staking", "yield"].some((value) =>
+    ["defi", "dao", "amm", "dex", "lending", "staking", "yield", "protocol", "uniswap", "aave", "compound", "curve"].some((value) =>
       joined.has(value),
     )
   ) {
@@ -275,7 +349,7 @@ export function classifyRepositoryType(
   }
 
   if (
-    ["nft", "gamefi", "gaming", "marketplace", "dapp"].some((value) =>
+    ["nft", "gamefi", "gaming", "marketplace", "dapp", "exchange", "trading"].some((value) =>
       joined.has(value),
     )
   ) {
@@ -283,15 +357,44 @@ export function classifyRepositoryType(
   }
 
   if (
-    ["solidity", "smart-contracts", "evm", "ethereum"].some((value) =>
+    ["solidity", "smart-contracts", "evm", "ethereum", "vyper"].some((value) =>
       joined.has(value),
     ) ||
-    primaryLanguage === "Solidity"
+    primaryLanguage === "Solidity" ||
+    primaryLanguage === "Vyper"
   ) {
     return RepositoryType.SMART_CONTRACTS;
   }
 
   return RepositoryType.OTHER;
+}
+
+export function detectRepositoryScope(input: {
+  topics?: string[];
+  matchedTopics: string[];
+  readme?: MarkdownDocument | null;
+  securityFile?: MarkdownDocument | null;
+  description?: string | null;
+  homepageUrl?: string | null;
+}): RepositoryScope {
+  if (input.matchedTopics.length === 0) {
+    return RepositoryScope.GENERAL;
+  }
+
+  return hasStrongWeb3Context(input)
+    ? RepositoryScope.WEB3
+    : RepositoryScope.GENERAL;
+}
+
+function buildQualificationContext(
+  scope: RepositoryScope,
+  matchedTopics: string[],
+): string {
+  if (scope === RepositoryScope.WEB3 && matchedTopics.length > 0) {
+    return `web3 topics ${matchedTopics.join(", ")}`;
+  }
+
+  return "general (non-web3) repository";
 }
 
 function collapseWhitespace(value: string): string {
@@ -323,29 +426,67 @@ function extractSecurityContact(text: string): string | undefined {
     return customContact;
   }
 
-  return text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0];
+  const email = text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0];
+
+  // Filter out personal/example emails - these are typically personal projects without real bounties
+  if (email && isPersonalOrExampleEmail(email)) {
+    return undefined;
+  }
+
+  return email;
+}
+
+function isPersonalOrExampleEmail(email: string): boolean {
+  const lowerEmail = email.toLowerCase();
+  return (
+    lowerEmail.includes('@example.') ||
+    lowerEmail.includes('@gmail.') ||
+    lowerEmail.includes('@gmail.com') ||
+    lowerEmail.includes('@hotmail.') ||
+    lowerEmail.includes('@yahoo.') ||
+    lowerEmail.includes('@outlook.') ||
+    lowerEmail.includes('@protonmail.') ||
+    lowerEmail.endsWith('@qq.com') ||
+    lowerEmail.endsWith('@163.com')
+  );
 }
 
 function extractBountyProgramUrl(text: string): string | undefined {
-  const urlMatches = text.match(/https?:\/\/[^\s)]+/gi) ?? [];
-  return urlMatches.find((url) =>
-    BUG_BOUNTY_HOSTS.some((host) => url.toLowerCase().includes(host)),
+  const urlMatches =
+    text.match(/https?:\/\/[^\s)]+/gi)?.map((url) => url.replace(/[.,;:]+$/g, "")) ??
+    [];
+  return (
+    urlMatches.find((url) =>
+      BUG_BOUNTY_HOSTS.some((host) => url.toLowerCase().includes(host)),
+    ) ??
+    urlMatches.find((url) => /\bbounty\b/i.test(url))
   );
 }
 
 export function extractSecurityEvidence(input: {
   readme?: MarkdownDocument | null;
   securityFile?: MarkdownDocument | null;
+  supplementalDocuments?: readonly MarkdownDocument[];
   repoHtmlUrl: string;
   description?: string | null;
   homepageUrl?: string | null;
   matchedTopics: string[];
+  scope?: RepositoryScope;
 }): SecurityEvidence | null {
-  const documents = [input.securityFile, input.readme].filter(Boolean) as MarkdownDocument[];
+  const qualificationContext = buildQualificationContext(
+    input.scope ?? RepositoryScope.WEB3,
+    input.matchedTopics,
+  );
+  const documents = [
+    input.securityFile,
+    input.readme,
+    ...(input.supplementalDocuments ?? []),
+  ].filter(Boolean) as MarkdownDocument[];
   const combinedText = collapseWhitespace(
     [
       input.securityFile?.body ?? "",
       input.readme?.body ?? "",
+      ...(input.supplementalDocuments?.map((document) => document.body) ?? []),
       input.description ?? "",
       input.homepageUrl ?? "",
     ].join("\n"),
@@ -368,7 +509,7 @@ export function extractSecurityEvidence(input: {
       ),
       securityContact,
       bountyProgramUrl,
-      qualificationSummary: `Matched topics ${input.matchedTopics.join(", ")} with SECURITY.md evidence.`,
+      qualificationSummary: `${qualificationContext} with repository security policy evidence.`,
     };
   }
 
@@ -383,7 +524,7 @@ export function extractSecurityEvidence(input: {
         ),
         securityContact,
         bountyProgramUrl,
-        qualificationSummary: `Matched topics ${input.matchedTopics.join(", ")} with bug bounty language in README.`,
+        qualificationSummary: `${qualificationContext} with bug bounty guidance in repository or project docs.`,
       };
     }
 
@@ -393,7 +534,7 @@ export function extractSecurityEvidence(input: {
         signalUrl: document.htmlUrl,
         excerpt: makeExcerpt(document.body, securityContact),
         securityContact,
-        qualificationSummary: `Matched topics ${input.matchedTopics.join(", ")} with a security contact in README.`,
+        qualificationSummary: `${qualificationContext} with a security contact in repository or project docs.`,
       };
     }
 
@@ -406,7 +547,7 @@ export function extractSecurityEvidence(input: {
         signalType: SecuritySignalType.RESPONSIBLE_DISCLOSURE,
         signalUrl: document.htmlUrl,
         excerpt: makeExcerpt(document.body, disclosureMatch[0]),
-        qualificationSummary: `Matched topics ${input.matchedTopics.join(", ")} with responsible disclosure language in README.`,
+        qualificationSummary: `${qualificationContext} with responsible disclosure guidance in repository or project docs.`,
       };
     }
   }
@@ -418,7 +559,7 @@ export function extractSecurityEvidence(input: {
       excerpt: makeExcerpt(combinedText, bountyProgramUrl),
       bountyProgramUrl,
       securityContact,
-      qualificationSummary: `Matched topics ${input.matchedTopics.join(", ")} with bounty signal in repository metadata.`,
+      qualificationSummary: `${qualificationContext} with bounty signal in repository metadata.`,
     };
   }
 
@@ -428,7 +569,7 @@ export function extractSecurityEvidence(input: {
       signalUrl: input.repoHtmlUrl,
       excerpt: makeExcerpt(combinedText, securityContact),
       securityContact,
-      qualificationSummary: `Matched topics ${input.matchedTopics.join(", ")} with security contact in repository metadata.`,
+      qualificationSummary: `${qualificationContext} with security contact in repository metadata.`,
     };
   }
 
@@ -493,12 +634,25 @@ async function fetchRepositorySearchPage(
   return data.items;
 }
 
-function getNextSearchPage(
-  currentPage: number,
-  itemCount: number,
-  perPage: number,
-): number {
-  return itemCount < perPage ? 1 : currentPage + 1;
+function parseRepositoryFullName(fullName: string): {
+  owner: string;
+  repo: string;
+} {
+  const match = collapseWhitespace(fullName).match(/^([^/\s]+)\/([^/\s]+)$/);
+  if (!match) {
+    throw new Error(
+      "Repository name must use the owner/repo format, for example spesmilo/electrum.",
+    );
+  }
+
+  return {
+    owner: match[1],
+    repo: match[2],
+  };
+}
+
+function shouldResetSearchCursor(error: unknown): boolean {
+  return error instanceof Error && /\(422\)/.test(error.message);
 }
 
 export function selectRepositoryCandidates<T extends { full_name: string }>(
@@ -532,6 +686,85 @@ export function selectRepositoryCandidates<T extends { full_name: string }>(
   return [...deduped.values()];
 }
 
+function advanceSearchCursor(
+  cursor: SearchQueryPageState,
+  itemCount: number,
+  perPage: number,
+): SearchQueryPageState {
+  if (itemCount === 0 || itemCount < perPage) {
+    return {
+      page: 1,
+      itemOffset: 0,
+    };
+  }
+
+  return {
+    page: cursor.page + 1,
+    itemOffset: 0,
+  };
+}
+
+export function consumeRepositoryCandidates<T extends { full_name: string }>(
+  resultsByQuery: readonly (readonly T[])[],
+  queryPages: readonly SearchQueryPageState[],
+  maxReposPerRun: number,
+  perPage: number,
+): CandidateSelectionResult<T> {
+  const deduped = new Map<string, T>();
+  const nextQueryPages = queryPages.map((queryPage, index) => ({
+    page: queryPage.page,
+    itemOffset: Math.max(
+      0,
+      Math.min(queryPage.itemOffset, resultsByQuery[index]?.length ?? 0),
+    ),
+  }));
+
+  while (deduped.size < maxReposPerRun) {
+    let consumedAny = false;
+
+    for (const [index, results] of resultsByQuery.entries()) {
+      const nextQueryPage = nextQueryPages[index];
+      if (!nextQueryPage || nextQueryPage.itemOffset >= results.length) {
+        continue;
+      }
+
+      const candidate = results[nextQueryPage.itemOffset];
+      nextQueryPage.itemOffset += 1;
+      consumedAny = true;
+
+      if (candidate && !deduped.has(candidate.full_name)) {
+        deduped.set(candidate.full_name, candidate);
+        if (deduped.size >= maxReposPerRun) {
+          break;
+        }
+      }
+    }
+
+    if (!consumedAny) {
+      break;
+    }
+  }
+
+  return {
+    candidates: [...deduped.values()],
+    nextQueryPages: nextQueryPages.map((nextQueryPage, index) =>
+      nextQueryPage.itemOffset >= resultsByQuery[index].length
+        ? advanceSearchCursor(nextQueryPage, resultsByQuery[index].length, perPage)
+        : nextQueryPage,
+    ),
+  };
+}
+
+export function rotateQueryOrder<T>(items: readonly T[], offset: number): T[] {
+  if (items.length === 0) {
+    return [];
+  }
+
+  const shift = ((Math.trunc(offset) % items.length) + items.length) %
+    items.length;
+  return [...items.slice(shift), ...items.slice(0, shift)];
+}
+
 async function searchRepositories(
   settings: GitHubRuntimeSettings,
   queryStatesInput: Array<{
@@ -540,75 +773,104 @@ async function searchRepositories(
   }>,
 ): Promise<SearchRepositoriesResult> {
   const perPage = getSearchResultsPerPage(settings);
-  const queryStates: QuerySearchState[] = queryStatesInput.map((query) => ({
-    rawQuery: query.rawQuery,
-    effectiveQuery: query.effectiveQuery,
-    nextPage: settings.githubSearchQueryPages[query.rawQuery] ?? 1,
-    active: true,
-  }));
+  // Round-robin luôn bắt đầu từ đầu danh sách, nên với maxReposPerRun < số
+  // query, các query cuối (general) bị starvation. Xoay thứ tự theo offset đã
+  // lưu để mỗi run bắt đầu từ một query khác nhau, đảm bảo phủ hết theo thời gian.
+  const queryStates: QuerySearchState[] = rotateQueryOrder(
+    queryStatesInput,
+    settings.searchRotationOffset,
+  )
+    // Chỉ bắn tối đa MAX_SEARCH_QUERIES_PER_RUN query/run để không chạm trần
+    // search 30/phút. Rotation đã xoay thứ tự nên phần bị cắt sẽ tới lượt ở run
+    // kế; cursor của các query không bắn được giữ nguyên bên dưới.
+    .slice(0, MAX_SEARCH_QUERIES_PER_RUN)
+    .map((query) => ({
+      rawQuery: query.rawQuery,
+      effectiveQuery: query.effectiveQuery,
+      searchPage: settings.githubSearchQueryPages[query.rawQuery]?.page ?? 1,
+      itemOffset: settings.githubSearchQueryPages[query.rawQuery]?.itemOffset ?? 0,
+    }));
+  const batchResults: GitHubRepositorySearchItem[][] = [];
+  const queryErrors = new Map<
+    string,
+    {
+      searchPage: number;
+      message: string;
+      resetCursor: boolean;
+    }
+  >();
+
+  for (const state of queryStates) {
+    try {
+      batchResults.push(
+        await fetchRepositorySearchPage(
+          state.effectiveQuery,
+          state.searchPage,
+          settings,
+        ),
+      );
+    } catch (error) {
+      batchResults.push([]);
+      queryErrors.set(state.rawQuery, {
+        searchPage: state.searchPage,
+        message: error instanceof Error ? error.message : "Unknown search error",
+        resetCursor: shouldResetSearchCursor(error),
+      });
+    }
+  }
+  const selection = consumeRepositoryCandidates(
+    batchResults,
+    queryStates.map((state) => ({
+      page: state.searchPage,
+      itemOffset: state.itemOffset,
+    })),
+    settings.maxReposPerRun,
+    perPage,
+  );
+  // Bắt đầu từ cursor hiện có của TẤT CẢ query, rồi chỉ ghi đè những query đã
+  // bắn trong run này — query bị cắt do cap vẫn giữ nguyên tiến độ trang.
   const nextSearchQueryPages: SearchQueryPageMap = {
     ...settings.githubSearchQueryPages,
   };
-  const selectedCandidates = new Map<string, GitHubRepositorySearchItem>();
-  const maxBatches =
-    Math.max(
-      1,
-      Math.ceil(
-        settings.maxReposPerRun /
-          Math.max(1, queryStatesInput.length * perPage),
-      ),
-    ) + 2;
-
-  for (
-    let batchIndex = 0;
-    batchIndex < maxBatches &&
-    selectedCandidates.size < settings.maxReposPerRun;
-    batchIndex += 1
-  ) {
-    const activeStates = queryStates.filter((state) => state.active);
-    if (activeStates.length === 0) {
-      break;
+  for (const [index, state] of queryStates.entries()) {
+    const queryError = queryErrors.get(state.rawQuery);
+    if (!queryError) {
+      nextSearchQueryPages[state.rawQuery] = selection.nextQueryPages[index];
+      continue;
     }
 
-    const batchResults = await Promise.all(
-      activeStates.map(async (state) => {
-        const currentPage = state.nextPage;
-        const items = await fetchRepositorySearchPage(
-          state.effectiveQuery,
-          currentPage,
-          settings,
-        );
-
-        state.nextPage = getNextSearchPage(currentPage, items.length, perPage);
-        state.active = items.length === perPage;
-        nextSearchQueryPages[state.rawQuery] = state.nextPage;
-
-        return items;
-      }),
-    );
-    const batchCandidates = selectRepositoryCandidates(
-      batchResults,
-      settings.maxReposPerRun - selectedCandidates.size,
-    );
-    let addedInBatch = 0;
-
-    for (const candidate of batchCandidates) {
-      if (selectedCandidates.has(candidate.full_name)) {
-        continue;
-      }
-
-      selectedCandidates.set(candidate.full_name, candidate);
-      addedInBatch += 1;
-    }
-
-    if (addedInBatch === 0) {
-      break;
-    }
+    nextSearchQueryPages[state.rawQuery] = queryError.resetCursor
+      ? {
+          page: 1,
+          itemOffset: 0,
+        }
+      : {
+          page: state.searchPage,
+          itemOffset: state.itemOffset,
+        };
   }
 
+  const nextRotationOffset =
+    queryStatesInput.length > 0
+      ? (Math.trunc(settings.searchRotationOffset) + 1) % queryStatesInput.length
+      : 0;
+
   return {
-    candidates: [...selectedCandidates.values()],
+    candidates: selection.candidates,
     nextSearchQueryPages,
+    nextRotationOffset,
+    errors: queryStates.flatMap((state) => {
+      const queryError = queryErrors.get(state.rawQuery);
+      return queryError
+        ? [
+            {
+              rawQuery: state.rawQuery,
+              searchPage: queryError.searchPage,
+              message: queryError.message,
+            },
+          ]
+        : [];
+    }),
   };
 }
 
@@ -625,9 +887,6 @@ async function qualifyRepository(
   settings: GitHubRuntimeSettings,
 ): Promise<Repository | null> {
   const matchedTopics = matchWeb3Topics(repo.topics, settings.githubTopics);
-  if (matchedTopics.length === 0) {
-    return null;
-  }
 
   const [readme, securityFile] = await Promise.all([
     fetchReadme(repo.owner.login, repo.name, settings),
@@ -639,18 +898,19 @@ async function qualifyRepository(
     ),
   ]);
 
-  if (
-    !hasStrongWeb3Context({
-      topics: repo.topics,
-      matchedTopics,
-      readme,
-      securityFile,
-      description: repo.description,
-      homepageUrl: repo.homepage,
-    })
-  ) {
+  // Ngưỡng chặt: cả web3 lẫn general đều bắt buộc có file SECURITY thực sự.
+  if (!securityFile) {
     return null;
   }
+
+  const scope = detectRepositoryScope({
+    topics: repo.topics,
+    matchedTopics,
+    readme,
+    securityFile,
+    description: repo.description,
+    homepageUrl: repo.homepage,
+  });
 
   const evidence = extractSecurityEvidence({
     readme,
@@ -659,6 +919,7 @@ async function qualifyRepository(
     description: repo.description,
     homepageUrl: repo.homepage,
     matchedTopics,
+    scope,
   });
 
   if (!evidence) {
@@ -666,13 +927,26 @@ async function qualifyRepository(
   }
 
   const now = new Date();
-  return prisma.repository.upsert({
+  // Định danh bất biến của GitHub là githubRepoId; fullName đổi khi repo được
+  // rename/transfer. Nếu vẫn còn dòng cũ giữ fullName này nhưng thuộc repo
+  // khác (id khác), xoá trước để không vi phạm unique constraint trên fullName.
+  await prisma.repository.deleteMany({
     where: {
       fullName: repo.full_name,
+      githubRepoId: {
+        not: BigInt(repo.id),
+      },
+    },
+  });
+
+  return prisma.repository.upsert({
+    where: {
+      githubRepoId: BigInt(repo.id),
     },
     update: {
       owner: repo.owner.login,
       name: repo.name,
+      fullName: repo.full_name,
       htmlUrl: repo.html_url,
       description: repo.description,
       homepageUrl: repo.homepage,
@@ -680,6 +954,7 @@ async function qualifyRepository(
       primaryLanguage: repo.language,
       topics: repo.topics,
       matchedTopics,
+      scope,
       repositoryType: classifyRepositoryType(repo.topics, repo.language),
       qualificationSummary: evidence.qualificationSummary,
       securitySignalType: evidence.signalType,
@@ -707,6 +982,7 @@ async function qualifyRepository(
       primaryLanguage: repo.language,
       topics: repo.topics,
       matchedTopics,
+      scope,
       repositoryType: classifyRepositoryType(repo.topics, repo.language),
       qualificationSummary: evidence.qualificationSummary,
       securitySignalType: evidence.signalType,
@@ -762,9 +1038,76 @@ function buildSyncNotes(input: {
   return notes.length > 0 ? notes.join(" ") : null;
 }
 
+async function settleStaleSyncRuns(): Promise<void> {
+  const cutoff = new Date(
+    Date.now() - STALE_SYNC_RUN_THRESHOLD_MINUTES * 60 * 1000,
+  );
+
+  await prisma.syncRun.updateMany({
+    where: {
+      status: SyncRunStatus.RUNNING,
+      finishedAt: null,
+      startedAt: {
+        lt: cutoff,
+      },
+    },
+    data: {
+      status: SyncRunStatus.FAILURE,
+      errorCount: 1,
+      notes:
+        "Marked as stale after a previous sync did not finish cleanly. A newer sync can proceed safely.",
+      finishedAt: new Date(),
+    },
+  });
+}
+
+async function findActiveSyncRun() {
+  return prisma.syncRun.findFirst({
+    where: {
+      status: SyncRunStatus.RUNNING,
+      finishedAt: null,
+    },
+    orderBy: {
+      startedAt: "desc",
+    },
+  });
+}
+
+export async function syncGitHubRepository(
+  fullName: string,
+): Promise<Repository | null> {
+  const { owner, repo } = parseRepositoryFullName(fullName);
+  const settings = await getGitHubRuntimeSettings();
+  const repository = await githubJson<GitHubRepositorySearchItem>(
+    `/repos/${owner}/${repo}`,
+    settings,
+  );
+  const qualifiedRepository = await qualifyRepository(repository, settings);
+
+  if (!qualifiedRepository) {
+    await pruneRepositoryIfTracked(repository.full_name);
+  }
+
+  return qualifiedRepository;
+}
+
 export async function runGitHubSync(
   source: "manual" | "schedule",
 ): Promise<SyncSummary> {
+  await settleStaleSyncRuns();
+  const activeRun = await findActiveSyncRun();
+  if (activeRun) {
+    return {
+      runId: activeRun.id,
+      status: activeRun.status,
+      candidateCount: activeRun.candidateCount,
+      qualifiedCount: activeRun.qualifiedCount,
+      upsertedCount: activeRun.upsertedCount,
+      skippedCount: activeRun.skippedCount,
+      errorCount: activeRun.errorCount,
+    };
+  }
+
   const settings = await getGitHubRuntimeSettings();
   const queryStates = settings.githubSearchQueries.map((rawQuery) => ({
     rawQuery,
@@ -786,15 +1129,29 @@ export async function runGitHubSync(
   let errorCount = 0;
 
   try {
-    const { candidates, nextSearchQueryPages } = await searchRepositories(
-      settings,
-      queryStates,
-    );
+    const {
+      candidates,
+      nextSearchQueryPages,
+      nextRotationOffset,
+      errors: searchErrors,
+    } = await searchRepositories(settings, queryStates);
     candidateCount = candidates.length;
     await updateGitHubSearchQueryPages({
       githubSearchQueries: settings.githubSearchQueries,
       githubSearchQueryPages: nextSearchQueryPages,
+      searchResultsPerQuery: settings.searchResultsPerQuery,
+      searchRotationOffset: nextRotationOffset,
     });
+    for (const searchError of searchErrors) {
+      errorCount += 1;
+      await prisma.syncError.create({
+        data: {
+          syncRunId: run.id,
+          stage: "search",
+          message: `${searchError.message} [query: ${searchError.rawQuery}; page: ${searchError.searchPage}]`,
+        },
+      });
+    }
 
     for (const candidate of candidates) {
       try {

@@ -5,11 +5,12 @@ import {
   createHash,
   randomBytes,
 } from "node:crypto";
-import { DEFAULT_SEARCH_QUERIES } from "@/lib/constants";
+import { DEFAULT_SEARCH_QUERIES, DEFAULT_WEB3_TOPICS } from "@/lib/constants";
 import { prisma } from "@/lib/db";
 import { getEnv } from "@/lib/env";
 
 const APP_SETTINGS_ID = "default";
+const MAX_GITHUB_SEARCH_RESULT_WINDOW = 1_000;
 const LEGACY_DEFAULT_SEARCH_QUERIES = [
   "topic:web3",
   "topic:solidity",
@@ -26,8 +27,67 @@ const PREVIOUS_DEFAULT_SEARCH_QUERIES = [
   "topic:rollup",
   "topic:foundry language:Solidity",
 ] as const;
+const LAST_DEFAULT_SEARCH_QUERIES = [
+  "topic:smart-contracts language:Solidity",
+  "topic:defi language:Solidity",
+  "topic:wallet topic:ethereum",
+  "topic:wallet topic:blockchain",
+  "topic:bridge topic:ethereum",
+  "topic:bridge topic:blockchain",
+  "topic:rollup topic:ethereum",
+  "topic:layer2 topic:ethereum",
+  "topic:foundry language:Solidity",
+] as const;
+// Danh sách web3-only trước khi mở rộng sang scope GENERAL. Install cũ dùng
+// đúng bộ này sẽ được tự nâng lên DEFAULT_SEARCH_QUERIES (web3 + general).
+const WEB3_ONLY_DEFAULT_SEARCH_QUERIES = [
+  "topic:blockchain topic:cryptocurrency",
+  "topic:blockchain",
+  "topic:cryptocurrency",
+  "topic:bitcoin",
+  "topic:ethereum",
+  "topic:solana",
+  "topic:cosmos",
+  "topic:smart-contracts language:Solidity",
+  "topic:defi language:Solidity",
+  "topic:wallet",
+  "topic:bridge",
+  "topic:rollup",
+  "topic:layer2",
+  "topic:foundry language:Solidity",
+  "topic:account-abstraction",
+  "topic:multisig",
+  "topic:dex",
+  "topic:lending",
+  "topic:staking",
+  "topic:amm",
+  "topic:nft",
+] as const;
+const LEGACY_DEFAULT_TOPICS = [
+  "web3",
+  "ethereum",
+  "evm",
+  "solidity",
+  "defi",
+  "smart-contracts",
+  "blockchain",
+  "wallet",
+  "bridge",
+  "layer2",
+  "rollup",
+  "foundry",
+  "hardhat",
+  "zk",
+  "dao",
+  "nft",
+] as const;
 
-export type SearchQueryPageMap = Record<string, number>;
+export type SearchQueryPageState = {
+  page: number;
+  itemOffset: number;
+};
+
+export type SearchQueryPageMap = Record<string, SearchQueryPageState>;
 
 export type GitHubRuntimeSettings = {
   githubToken?: string;
@@ -36,11 +96,12 @@ export type GitHubRuntimeSettings = {
   maxReposPerRun: number;
   searchResultsPerQuery: number;
   githubSearchQueryPages: SearchQueryPageMap;
+  searchRotationOffset: number;
 };
 
 export type DashboardGitHubSettings = Omit<
   GitHubRuntimeSettings,
-  "githubSearchQueryPages"
+  "githubSearchQueryPages" | "searchRotationOffset"
 > & {
   githubTokenConfigured: boolean;
   githubTokenMask: string | null;
@@ -85,17 +146,25 @@ function decryptSecret(value: string): string {
 
 function buildDefaultGitHubSettings(): GitHubRuntimeSettings {
   const env = getEnv();
+  const githubTopics = isLegacyDefaultTopics(env.githubTopics)
+    ? [...DEFAULT_WEB3_TOPICS]
+    : [...env.githubTopics];
   const githubSearchQueries = isLegacyDefaultSearchQueries(env.githubSearchQueries)
     ? [...DEFAULT_SEARCH_QUERIES]
     : [...env.githubSearchQueries];
 
   return {
     githubToken: env.githubToken,
-    githubTopics: [...env.githubTopics],
+    githubTopics,
     githubSearchQueries,
     maxReposPerRun: env.maxReposPerRun,
     searchResultsPerQuery: env.searchResultsPerQuery,
-    githubSearchQueryPages: normaliseSearchQueryPages(null, githubSearchQueries),
+    githubSearchQueryPages: normaliseSearchQueryPages(
+      null,
+      githubSearchQueries,
+      env.searchResultsPerQuery,
+    ),
+    searchRotationOffset: 0,
   };
 }
 
@@ -112,8 +181,14 @@ function areQueriesEquivalent(
 function isLegacyDefaultSearchQueries(queries: readonly string[]): boolean {
   return (
     areQueriesEquivalent(queries, LEGACY_DEFAULT_SEARCH_QUERIES) ||
-    areQueriesEquivalent(queries, PREVIOUS_DEFAULT_SEARCH_QUERIES)
+    areQueriesEquivalent(queries, PREVIOUS_DEFAULT_SEARCH_QUERIES) ||
+    areQueriesEquivalent(queries, LAST_DEFAULT_SEARCH_QUERIES) ||
+    areQueriesEquivalent(queries, WEB3_ONLY_DEFAULT_SEARCH_QUERIES)
   );
+}
+
+function isLegacyDefaultTopics(topics: readonly string[]): boolean {
+  return areQueriesEquivalent(topics, LEGACY_DEFAULT_TOPICS);
 }
 
 function maskToken(value: string | undefined): string | null {
@@ -143,23 +218,54 @@ function shouldResetSearchQueryPages(input: {
 export function normaliseSearchQueryPages(
   value: unknown,
   queries: readonly string[],
+  searchResultsPerQuery = 8,
 ): SearchQueryPageMap {
   const rawPages =
     value && typeof value === "object" && !Array.isArray(value)
       ? (value as Record<string, unknown>)
       : {};
+  const perPage = Math.max(1, Math.min(searchResultsPerQuery, 100));
+  const maxPage = Math.max(
+    1,
+    Math.ceil(MAX_GITHUB_SEARCH_RESULT_WINDOW / perPage),
+  );
 
   return Object.fromEntries(
     queries.map((query) => {
       const rawPage = rawPages[query];
-      const page =
+      let page = 1;
+      let itemOffset = 0;
+
+      if (
         typeof rawPage === "number" &&
         Number.isInteger(rawPage) &&
         rawPage > 0
-          ? rawPage
-          : 1;
+      ) {
+        page = Math.min(rawPage, maxPage);
+      } else if (
+        rawPage &&
+        typeof rawPage === "object" &&
+        !Array.isArray(rawPage)
+      ) {
+        const rawState = rawPage as Record<string, unknown>;
+        if (
+          typeof rawState.page === "number" &&
+          Number.isInteger(rawState.page) &&
+          rawState.page > 0
+        ) {
+          page = Math.min(rawState.page, maxPage);
+        }
 
-      return [query, page];
+        if (
+          typeof rawState.itemOffset === "number" &&
+          Number.isInteger(rawState.itemOffset) &&
+          rawState.itemOffset >= 0
+        ) {
+          itemOffset = rawState.itemOffset;
+        }
+      }
+
+      return [query, { page, itemOffset }];
     }),
   );
 }
@@ -170,16 +276,37 @@ async function ensureAppSettingsRecord() {
   });
 
   if (existing) {
-    if (isLegacyDefaultSearchQueries(existing.githubSearchQueries)) {
-      const githubSearchQueries = [...DEFAULT_SEARCH_QUERIES];
+    const githubTopics = isLegacyDefaultTopics(existing.githubTopics)
+      ? [...DEFAULT_WEB3_TOPICS]
+      : existing.githubTopics;
+    const githubSearchQueries = isLegacyDefaultSearchQueries(
+      existing.githubSearchQueries,
+    )
+      ? [...DEFAULT_SEARCH_QUERIES]
+      : existing.githubSearchQueries;
+    const normalisedCurrentPages = normaliseSearchQueryPages(
+      existing.searchQueryPages,
+      existing.githubSearchQueries,
+      existing.searchResultsPerQuery,
+    );
+    const nextSearchQueryPages = normaliseSearchQueryPages(
+      existing.searchQueryPages,
+      githubSearchQueries,
+      existing.searchResultsPerQuery,
+    );
+
+    if (
+      !areQueriesEquivalent(existing.githubTopics, githubTopics) ||
+      !areQueriesEquivalent(existing.githubSearchQueries, githubSearchQueries) ||
+      JSON.stringify(normalisedCurrentPages) !==
+        JSON.stringify(nextSearchQueryPages)
+    ) {
       return prisma.appSettings.update({
         where: { id: APP_SETTINGS_ID },
         data: {
+          githubTopics,
           githubSearchQueries,
-          searchQueryPages: normaliseSearchQueryPages(
-            existing.searchQueryPages,
-            githubSearchQueries,
-          ),
+          searchQueryPages: nextSearchQueryPages,
         },
       });
     }
@@ -247,8 +374,18 @@ function mapSettingsRecord(
       record.githubSearchQueries.length > 0
         ? record.githubSearchQueries
         : defaults.githubSearchQueries,
+      record.searchResultsPerQuery,
     ),
+    searchRotationOffset: normaliseRotationOffset(record.searchRotationOffset),
   };
+}
+
+export function normaliseRotationOffset(value: unknown): number {
+  if (typeof value === "number" && Number.isInteger(value) && value >= 0) {
+    return value;
+  }
+
+  return 0;
 }
 
 export function parseTopicInput(value: string): string[] {
@@ -341,6 +478,7 @@ export async function updateGitHubRuntimeSettings(input: {
       searchQueryPages: normaliseSearchQueryPages(
         resetSearchQueryPages ? null : existing.searchQueryPages,
         githubSearchQueries,
+        input.searchResultsPerQuery,
       ),
     },
   });
@@ -349,6 +487,8 @@ export async function updateGitHubRuntimeSettings(input: {
 export async function updateGitHubSearchQueryPages(input: {
   githubSearchQueries: string[];
   githubSearchQueryPages: SearchQueryPageMap;
+  searchResultsPerQuery: number;
+  searchRotationOffset?: number;
 }): Promise<void> {
   await prisma.appSettings.update({
     where: { id: APP_SETTINGS_ID },
@@ -356,7 +496,16 @@ export async function updateGitHubSearchQueryPages(input: {
       searchQueryPages: normaliseSearchQueryPages(
         input.githubSearchQueryPages,
         input.githubSearchQueries,
+        input.searchResultsPerQuery,
       ),
+      ...(input.searchRotationOffset === undefined
+        ? {}
+        : {
+            searchRotationOffset: Math.max(
+              0,
+              Math.trunc(input.searchRotationOffset),
+            ),
+          }),
     },
   });
 }

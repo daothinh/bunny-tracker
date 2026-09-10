@@ -14,6 +14,7 @@
     "db:migrate": "prisma migrate dev",
     "db:deploy": "prisma migrate deploy",
     "sync:once": "tsx src/scripts/run-sync.ts",
+    "sync:repo": "tsx src/scripts/sync-repo.ts",
     "postinstall": "prisma generate"
   },
   "dependencies": {

@@ -7,6 +7,11 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+enum RepositoryScope {
+  WEB3
+  GENERAL
+}
+
 enum RepositoryType {
   SMART_CONTRACTS
   PROTOCOL
@@ -55,6 +60,7 @@ model Repository {
   primaryLanguage       String?
   topics                Json
   matchedTopics         Json
+  scope                 RepositoryScope    @default(WEB3)
   repositoryType        RepositoryType     @default(OTHER)
   qualificationSummary  String
   securitySignalType    SecuritySignalType
@@ -74,6 +80,7 @@ model Repository {
   createdAt             DateTime           @default(now())
   updatedAt             DateTime           @updatedAt
 
+  @@index([scope])
   @@index([reportStatus])
   @@index([repositoryType])
   @@index([lastSeenAt])
@@ -119,6 +126,7 @@ model AppSettings {
   maxReposPerRun        Int      @default(18)
   searchResultsPerQuery Int      @default(8)
   searchQueryPages      Json?
+  searchRotationOffset  Int      @default(0)
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
 }

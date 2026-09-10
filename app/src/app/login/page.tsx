@@ -28,8 +28,6 @@ export default async function LoginPage() {
           </h1>
 
           <p className="mt-5 max-w-2xl text-base leading-8 text-[color:var(--muted)]">
-            Tổng hợp, quản lý và trực quan hóa danh sách GitHub repo web3 có
-            security signal phù hợp cho bug bounty workflow.
           </p>
 
           <div className="mt-10 grid gap-4 sm:grid-cols-2">
@@ -38,9 +36,6 @@ export default async function LoginPage() {
                 Discovery rule
               </p>
               <p className="mt-3 text-sm leading-7 text-[color:var(--foreground)]">
-                Chỉ giữ lại repo có topic web3 và có README hoặc SECURITY.md
-                nhắc đến bug bounty, responsible disclosure, hoặc security
-                contact.
               </p>
             </div>
             <div className="shell-pill rounded-3xl p-5">
@@ -48,8 +43,7 @@ export default async function LoginPage() {
                 Dashboard scope
               </p>
               <p className="mt-3 text-sm leading-7 text-[color:var(--foreground)]">
-                Hiển thị tên repo, URL, type, security evidence và trạng thái
-                submit report trong một màn hình quản trị.
+
               </p>
             </div>
           </div>
@@ -65,7 +59,6 @@ export default async function LoginPage() {
             Đăng nhập bằng management-key
           </h2>
           <p className="mt-3 text-sm leading-7 text-[color:var(--muted)]">
-            Sau khi xác thực, hệ thống tạo session cookie HTTP-only và mở dashboard.
           </p>
 
           <div className="mt-8">

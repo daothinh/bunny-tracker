@@ -1,13 +1,17 @@
 # Pug Bunny Tricker
 
-Dashboard quan tri de thu thap, tong hop va quan ly target bug bounty web3 chi tu GitHub repositories.
+Dashboard quan tri de thu thap, tong hop va quan ly target bug bounty tu GitHub repositories, chia lam hai scope: `WEB3` va `GENERAL` (phan con lai).
 
-## Valid repository rules
+## Scope va valid repository rules
 
-Repo duoc giu lai khi thoa man ca hai dieu kien:
+Moi repo duoc giu lai deu bat buoc co **file SECURITY thuc su** (SECURITY / SECURITY.md / SECURITY.txt trong root, `.github/`, `docs/`, hoac `.well-known/security.txt`). Day la nguong bat buoc chung cho ca hai scope.
 
-1. Co it nhat mot topic nam trong allowlist web3.
-2. Co it nhat mot security signal trong `README` hoac `SECURITY.md`, vi du:
+Scope duoc gan theo topic web3 cua chinh repo:
+
+- `WEB3`: repo co topic nam trong allowlist web3 va co web3 context ro rang (topic/description/README/SECURITY).
+- `GENERAL`: cac repo con lai (khong co topic web3, hoac topic web3 mo ho khong du context).
+
+Sau khi qualify, `security evidence` (bounty URL, security contact, responsible disclosure...) van duoc trich xuat tu file SECURITY va README de hien thi:
    - `bug bounty`
    - `responsible disclosure`
    - `security policy`
@@ -68,4 +72,5 @@ npm run sync:once
 - `GITHUB_TOKEN` rat nen duoc cau hinh. Khong co token, GitHub Search va contents API se bi rate limit rat nhanh.
 - Moi search query duoc bo sung cac qualifier on dinh truoc khi goi GitHub Search API: `fork:false`, `archived:false`, `is:public`, `mirror:false`, `stars:>=5`, va `pushed:>=...` neu chua duoc khai bao san.
 - Token GitHub duoc ma hoa truoc khi luu vao database bang secret cua ung dung.
-- Dashboard hien thi ten repo, URL repo, type, security evidence va report status. Notes cho tung repo duoc luu trong database.
+- Dashboard hien thi ten repo, URL repo, scope (web3 / general), type, security evidence va report status. Notes cho tung repo duoc luu trong database.
+- Co the loc theo scope tren dashboard, va card `Tracked` hien thi breakdown so repo web3 vs general.
